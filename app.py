@@ -271,6 +271,22 @@ else:
                         st.error(msg)
             else: st.info("No medium/high-risk bookings are currently eligible for a reminder. The reminder window opens 3 hours before start and closes 2 hours before start.")
         else: st.info("No active bookings for this date.")
+        st.markdown("### No-response risk review")
+        st.caption("Only bookings automatically released at T−2 for no response appear here. Employees who confirmed before T−3 or selected KEEP during the check-in window are excluded. Non-response is a review signal, not proof of a no-show.")
+        review_rows=be.risk_review_queue(DB,demo_day.isoformat())
+        if review_rows:
+            review_data=[]
+            for booking in review_rows:
+                score,band,reasons=risk(booking,now)
+                review_data.append({**booking,"risk":score,"band":band,
+                                    "reason":" · ".join(reasons) or "No additional historical risk indicators",
+                                    "review_trigger":"No response by T−2; automatically released"})
+            review_df=pd.DataFrame(review_data).sort_values("risk",ascending=False)
+            st.dataframe(review_df[["booking_id","booker_name","space","start_time","risk","band","reason","review_trigger"]],
+                         use_container_width=True,hide_index=True,
+                         column_config={"risk":st.column_config.ProgressColumn("Advisory score",min_value=0,max_value=100,format="%d")})
+        else:
+            st.info("No bookings are currently eligible for no-response risk review on this date.")
     with tab3:
         pending=be.pending_requests(DB)
         if not pending: st.info("No reschedule requests awaiting coordinator review.")
