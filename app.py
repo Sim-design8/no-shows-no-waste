@@ -2,7 +2,8 @@
 Booker and coordinator experiences share the tested SQLite booking engine.
 CSV is used instead of live calendar integration; notifications are simulated.
 """
-import json, os, random
+import json, os, random, smtplib
+from email.message import EmailMessage
 from datetime import date, datetime, time, timedelta
 import pandas as pd
 import streamlit as st
@@ -79,6 +80,54 @@ def risk(b, now):
     return score, ("High" if score>=60 else "Medium" if score>=35 else "Low"), why
 
 SYSTEM_INSTRUCTION="""Write one friendly, concise email body (max 70 words) from a workplace coordinator to an employee. Mention only supplied booking details and deadline. Ask them to reply KEEP, RESCHEDULE or CANCEL. Explain that no response by the deadline releases the booking automatically. Never mention risk scores or blame the employee. Return only the message."""
+def gemini_risk_advice(b, score, band, reasons, api_key, model):
+    """Explain rule-based risk and suggest a cautious next action; never execute it."""
+    if not api_key:
+        return "Gemini is not configured. Review the rule-based score and reasons manually."
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        payload = {"booking_id": b["booking_id"], "space": b["space"], "date": b["booking_date"],
+                   "start": b["start_time"], "booker": b["booker_name"], "rule_based_score": score,
+                   "risk_band": band, "risk_reasons": reasons, "past_bookings": b["past_bookings"],
+                   "past_no_shows": b["past_no_shows"], "lead_days": b["lead_days"],
+                   "recurring": bool(b["recurring"]), "status": b["status"]}
+        instruction = ("You are an assistant to a workplace facilities coordinator. Explain the supplied "
+          "rule-based risk signals in plain language and recommend one cautious next step from "
+          "CONFIRM, KEEP, RESCHEDULE, or CONSIDER RELEASE. Do not claim to know whether the person "
+          "will attend. Do not invent facts, do not cancel/release/reschedule anything, and state that "
+          "the coordinator must decide. Return concise headings: Risk explanation, Suggested action, Why, "
+          "Coordinator check. Treat the score as a heuristic, not a probability.")
+        result = client.models.generate_content(model=model, contents=json.dumps(payload),
+          config=types.GenerateContentConfig(system_instruction=instruction, temperature=0.2, max_output_tokens=260))
+        return (result.text or "No recommendation was generated.").strip()
+    except Exception as ex:
+        return f"Gemini analysis unavailable ({type(ex).__name__}). Use the rule-based score and review manually."
+
+
+def send_gmail(to_email, subject, body):
+    """Send through Gmail SMTP using secrets; never expose credentials in the UI."""
+    try:
+        sender = st.secrets["GMAIL_ADDRESS"]
+        app_password = st.secrets["GMAIL_APP_PASSWORD"]
+        if not sender or not app_password:
+            return False, "Gmail is not configured in Streamlit Secrets."
+        msg = EmailMessage()
+        msg["From"] = sender
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.set_content(body)
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+            server.login(sender, app_password.replace(" ", ""))
+            server.send_message(msg)
+        return True, f"Email sent to {to_email}."
+    except KeyError:
+        return False, "Add GMAIL_ADDRESS and GMAIL_APP_PASSWORD to Streamlit Secrets."
+    except Exception as ex:
+        return False, f"Gmail send failed ({type(ex).__name__}). Check Gmail credentials and recipient address."
+
+
 def reminder_text(b, deadline, api_key, model):
     p={"booker_name":b['booker_name'],"space":b['space'],"date":b['booking_date'],"start":b['start_time'],"deadline":deadline.strftime('%H:%M'),"host":b['coordinator_name']}
     fallback=(f"Hi {p['booker_name']}, please confirm {p['space']} on {p['date']} at {p['start']}. Reply KEEP, RESCHEDULE or CANCEL. Without a reply by {p['deadline']}, the booking will be released. — {p['host']}")
@@ -108,6 +157,8 @@ with st.sidebar:
             key_default = os.environ.get("GEMINI_API_KEY", "")
         api_key=st.text_input("Gemini API key (optional)",value=key_default,type="password")
         model=st.text_input("Gemini model",DEFAULT_MODEL)
+        gmail_ready = bool(st.secrets.get("GMAIL_ADDRESS", "") and st.secrets.get("GMAIL_APP_PASSWORD", ""))
+        st.caption("Gmail notifications: " + ("configured" if gmail_ready else "not configured — add Gmail secrets"))
         st.divider()
         upload=st.file_uploader("Import calendar CSV",type=["csv"])
         if upload and st.button("Import bookings from CSV",use_container_width=True):
@@ -147,7 +198,7 @@ if view.startswith("Booker"):
         st.markdown("### ＋ Book a space")
         with st.form("booker_new_booking",clear_on_submit=True):
             person=st.text_input("Your name",value=next((b['booker_name'] for b in my),"Demo Employee"))
-            email=st.text_input("Your email",value=selected_email or "employee@example.com")
+            email=st.text_input("Your email",value=selected_email or "employee@example.com",disabled=True,help="This email is locked to the selected demo employee.")
             book_date=st.date_input("Booking date",value=demo_day,key="book_date")
             spaces=be.list_spaces(DB) or ["Desk D-1"]
             space=st.selectbox("Choose a space",spaces)
@@ -239,6 +290,16 @@ else:
                 opens,deadline=be.checkin_window(r)
                 if opens <= now < deadline:
                     candidates.append(r)
+            if risk_rows:
+                st.markdown("### Gemini risk explanation & action recommendation")
+                insight_options = {r["booking_id"]: f'{r["booking_id"]} · {r["booker_name"]} · {r["band"]} ({r["risk"]})' for r in risk_rows}
+                insight_id = st.selectbox("Choose a booking for AI analysis", list(insight_options), format_func=insight_options.get, key="ai_insight_booking")
+                insight_booking = be.get_booking(insight_id, DB)
+                if st.button("✨ Explain risk & recommend next step"):
+                    s, band, why = risk(insight_booking, now)
+                    st.session_state["ai_insight_result"] = gemini_risk_advice(insight_booking, s, band, why, api_key, model)
+                if st.session_state.get("ai_insight_booking") == insight_id and st.session_state.get("ai_insight_result"):
+                    st.info(st.session_state["ai_insight_result"])
             if candidates:
                 st.markdown("### Send a confirmation reminder")
                 labels={b['booking_id']:f"{b['booking_id']} · {b['booker_name']} · {b['space']} · {b['start_time']} · {b['band']} ({b['risk']})" for b in candidates}
@@ -251,10 +312,14 @@ else:
                     body,source=st.session_state[f"draft_{chosen}"]; st.caption(source)
                     edited=st.text_area("Review reminder before sending",body,key=f"edit_{chosen}")
                     subject=f"Please confirm your booking for {bsel['space']}"
-                    if st.button("Send reminder (simulated)"):
-                        ok,msg=be.send_reminder(chosen,subject,edited,now,DB)
-                        if ok: st.session_state.notice=msg; st.rerun()
-                        st.error(msg)
+                    if st.button("Send reminder by Gmail", type="primary"):
+                        sent, send_msg = send_gmail(bsel["booker_email"], subject, edited)
+                        if sent:
+                            ok,msg=be.send_reminder(chosen,subject,edited,now,DB)
+                            if ok: st.session_state.notice=send_msg + " " + msg; st.rerun()
+                            st.error(msg)
+                        else:
+                            st.error(send_msg)
             else: st.info("No medium/high-risk bookings are currently eligible for a reminder. The reminder window opens 3 hours before start and closes 2 hours before start.")
         else: st.info("No active bookings for this date.")
     with tab3:
@@ -271,9 +336,9 @@ else:
                     ok,msg=be.reject_reschedule(q['request_id'],now,DB); st.session_state.notice=msg; st.rerun()
     with tab4:
         notifications=be.notifications(DB)
-        st.caption("All messages are simulated. No email is actually sent.")
+        st.caption("Reminder emails are sent through Gmail when configured. Other workflow events are recorded in this notification log.")
         if notifications: st.dataframe(pd.DataFrame(notifications)[["created_at","kind","to_email","subject","body"]],use_container_width=True,hide_index=True)
         else: st.info("No notifications yet.")
 
 with st.expander("Prototype scope & transparency"):
-    st.markdown("- Coordinator is the booking host; booker email identifies the requester.\n- CSV substitutes for Outlook/Google Calendar integration.\n- Email notifications are simulated; no real messages are sent.\n- Risk score is rule-based; Gemini only drafts reminder text.\n- SQLite is used for this college prototype; production would need persistent hosted storage, authentication and calendar/email integrations.\n- All seeded demo people and bookings are synthetic.")
+    st.markdown("- Coordinator is the booking host; booker email identifies the requester.\n- CSV substitutes for Outlook/Google Calendar integration.\n- Reminder emails can be sent through Gmail when credentials are configured in Streamlit Secrets.\n- Risk score is rule-based; Gemini only drafts reminder text.\n- SQLite is used for this college prototype; production would need persistent hosted storage, authentication and calendar/email integrations.\n- All seeded demo people and bookings are synthetic.")
