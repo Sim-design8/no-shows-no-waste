@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 import booking_engine as be
 
-st.set_page_config(page_title="No-Shows, No Waste", page_icon="🪑", layout="wide")
+st.set_page_config(page_title="No-Shows, No Waste | Shared Space Recovery", page_icon="🪑", layout="wide")
 DB = os.environ.get("NSNW_DB", be.DB_PATH)
 be.init_db(DB)
 HOST_NAME, HOST_EMAIL = "Facilities Desk", "facilities.desk@example.com"
@@ -17,20 +17,30 @@ DEFAULT_MODEL = "gemini-2.5-flash"
 # ---------- visual system ----------
 st.markdown("""
 <style>
-:root { --ink:#172554; --muted:#64748b; --blue:#2563eb; --line:#dbeafe; }
-.block-container {padding-top:1.5rem; padding-bottom:2rem; max-width:1400px;}
-[data-testid="stAppViewContainer"] {background:linear-gradient(135deg,#f7faff 0%,#f8f7ff 100%);}
-[data-testid="stSidebar"] {background:#eef4ff;}
-.hero {padding:1.1rem 1.4rem;border:1px solid #dbeafe;border-radius:18px;background:#fff;margin-bottom:1rem;}
-.hero h1 {color:#172554;font-size:1.8rem;margin:0 0 .25rem 0;}
-.hero p {color:#64748b;margin:0;}
-.kpi {background:white;border:1px solid #dbeafe;border-radius:15px;padding:1rem;min-height:105px;}
-.kpi .n {font-size:1.8rem;font-weight:750;color:#172554;}
-.kpi .l {font-size:.85rem;color:#64748b;}
-.panel {background:white;border:1px solid #e2e8f0;border-radius:16px;padding:1rem 1.1rem;margin:.5rem 0 1rem 0;}
-.pill {display:inline-block;padding:.22rem .65rem;border-radius:99px;font-weight:650;font-size:.82rem;}
-.green {background:#dcfce7;color:#166534;} .amber {background:#fef3c7;color:#92400e;} .red {background:#fee2e2;color:#991b1b;} .blue {background:#dbeafe;color:#1d4ed8;}
-div.stButton>button {border-radius:10px;font-weight:600;}
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
+:root { --ink:#24213b; --muted:#77758a; --purple:#6b55e8; --purple-dark:#4f3acb; --line:#eceaf4; }
+html, body, [class*="css"] { font-family:'DM Sans',sans-serif; }
+.block-container {padding:1.4rem 2rem 2.5rem; max-width:1540px;}
+[data-testid="stAppViewContainer"] {background:linear-gradient(135deg,#fbfaff 0%,#f5f7ff 52%,#fff9fc 100%);}
+[data-testid="stSidebar"] {background:#fff; border-right:1px solid #eeeaf7;}
+[data-testid="stSidebar"] h2 {color:var(--ink);font-weight:800;}
+.hero {padding:1.35rem 1.6rem;border:1px solid #eeebf7;border-radius:22px;background:linear-gradient(110deg,#fff 0%,#f7f4ff 100%);margin-bottom:1.25rem;box-shadow:0 8px 28px rgba(51,39,108,.05);}
+.hero h1 {color:var(--ink);font-size:2rem;font-weight:800;margin:0 0 .3rem 0;letter-spacing:-.04em;}
+.hero p {color:var(--muted);margin:0;font-size:1rem;}
+.kpi {background:white;border:1px solid var(--line);border-radius:18px;padding:1.15rem 1.25rem;min-height:112px;box-shadow:0 6px 20px rgba(44,35,90,.04);}
+.kpi .n {font-size:2rem;font-weight:800;color:var(--purple-dark);letter-spacing:-.04em;}
+.kpi .l {font-size:.86rem;color:var(--muted);font-weight:600;}
+.panel {background:white;border:1px solid var(--line);border-radius:18px;padding:1.1rem 1.2rem;margin:.5rem 0 1rem 0;box-shadow:0 5px 18px rgba(44,35,90,.035);}
+.pill {display:inline-block;padding:.22rem .65rem;border-radius:99px;font-weight:700;font-size:.82rem;}
+.green {background:#e4f7ee;color:#16794b;} .amber {background:#fff3d9;color:#946200;} .red {background:#ffebed;color:#b4233b;} .blue {background:#eeeaff;color:#5b45d6;}
+.stTabs [data-baseweb="tab-list"] {gap:8px;border-bottom:1px solid #eceaf4;}
+.stTabs [data-baseweb="tab"] {background:#f3f1fb;border-radius:12px 12px 0 0;padding:12px 18px;color:#6d6882;font-weight:700;}
+.stTabs [aria-selected="true"] {background:#6b55e8!important;color:#fff!important;}
+div.stButton>button, div.stFormSubmitButton>button {border-radius:12px;border:1px solid #ded8fb;font-weight:700;min-height:2.7rem;}
+div.stButton>button[kind="primary"], div.stFormSubmitButton>button[kind="primary"] {background:#6b55e8;border-color:#6b55e8;color:white;}
+[data-testid="stDataFrame"] {border:1px solid #eeeaf4;border-radius:14px;overflow:hidden;}
+[data-testid="stMetric"] {background:white;border:1px solid var(--line);padding:14px;border-radius:14px;}
+[data-testid="stExpander"] {background:white;border:1px solid var(--line);border-radius:14px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,6 +94,7 @@ def reminder_text(b, deadline, api_key, model):
 # ---------- sidebar controls ----------
 with st.sidebar:
     st.markdown("## 🪑 No-Shows, No Waste")
+    st.caption("SHARED SPACE RECOVERY")
     view=st.radio("Choose your view",["Booker (Employee)","Coordinator (Facilities)"],index=0)
     st.divider()
     demo_day=st.date_input("Demo date",value=date.today())
@@ -122,7 +133,7 @@ if released: st.warning("Automatically released at deadline: "+", ".join(release
 
 # ---------- booker experience ----------
 if view.startswith("Booker"):
-    st.markdown('<div class="hero"><h1>👋 Booker workspace</h1><p>Book a space, keep your plans up to date, and release rooms you no longer need.</p></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hero"><h1>Find your place to work.</h1><p>Discover available desks and meeting rooms, manage your bookings, and free up space when plans change.</p></div>',unsafe_allow_html=True)
     emails=sorted({b['booker_email'] for b in all_rows if b.get('booker_email')})
     selected_email=st.selectbox("Demo employee · requester email",emails,index=0 if emails else None,help="Choose a synthetic employee to preview their personal booking experience.")
     my=[b for b in all_rows if b['booker_email']==selected_email]
@@ -181,7 +192,7 @@ if view.startswith("Booker"):
 
 # ---------- coordinator experience ----------
 else:
-    st.markdown('<div class="hero"><h1>Facilities coordinator</h1><p>Monitor booking activity, intervene on at-risk spaces, and recover capacity before it goes to waste.</p></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hero"><h1>Workspace operations</h1><p>A clear daily view of bookings, potential no-shows, reminders and recovered capacity.</p></div>',unsafe_allow_html=True)
     today=[b for b in all_rows if b['booking_date']==demo_day.isoformat()]
     counts=be.counts(DB,demo_day.isoformat())
     risk_rows=[]
@@ -201,16 +212,7 @@ else:
             st.dataframe(df[["booking_id","space","time","coordinator_name","booker_name","booker_email","status"]].rename(columns={"coordinator_name":"Host","booker_name":"Requester","booker_email":"Requester email"}),use_container_width=True,hide_index=True)
         else: st.info("No bookings for the selected demo date.")
         st.markdown("### Booking status")
-        # Present status totals as readable KPI cards instead of rendering a raw dict.
-        status_counts = [(label, value) for label, value in counts.items()
-                         if label != "Pending reschedules"]
-        if status_counts:
-            status_cols = st.columns(min(4, len(status_counts)))
-            for idx, (label, value) in enumerate(status_counts):
-                with status_cols[idx % len(status_cols)]:
-                    st.metric(label=label, value=value)
-        else:
-            st.caption("No booking status data for this date yet.")
+        st.write({k:v for k,v in counts.items() if k!="Pending reschedules"})
     with tab2:
         st.caption("Risk is a transparent heuristic to prioritise coordinator attention; it does not itself cancel bookings.")
         if risk_rows:
