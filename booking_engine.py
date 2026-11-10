@@ -546,7 +546,7 @@ def process_deadlines(now, db=DB_PATH):
         rows = conn.execute("SELECT * FROM bookings WHERE status='Active' AND reminder_sent_at IS NOT NULL "
                             "AND respond_by IS NOT NULL AND respond_by <= ?", (now_str(now),)).fetchall()
         for r in rows:
-            conn.execute("UPDATE bookings SET status='Released', updated_at=? WHERE booking_id=?",
+            conn.execute("UPDATE bookings SET status='Released', risk_review_eligible=1, updated_at=? WHERE booking_id=?",
                          (now_str(now), r["booking_id"]))
             _close_requests(conn, r["booking_id"])
             body = f"{r['space']} {r['booking_date']} {r['start_time']}-{r['end_time']} was released: no confirmation by {r['respond_by'][-5:]}."
