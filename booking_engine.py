@@ -324,11 +324,14 @@ def respond(booking_id, action, now, db=DB_PATH, new_slot=None):
             conn.execute("ROLLBACK")
             return False, "Booking is not active"
         if action == "KEEP":
+            # KEEP settles the original booking, so any outstanding reschedule
+            # approval must be closed to prevent a later approval moving it.
+            _close_requests(conn, booking_id)
             conn.execute("UPDATE bookings SET status='Confirmed', updated_at=? WHERE booking_id=?",
                          (now_str(now), booking_id))
             _notify(conn, now, booking_id, "keep", r["coordinator_email"], f"{r['booker_name']} kept {r['space']}",
                     f"{r['booker_name']} confirmed the booking for {r['space']} on {r['booking_date']} {r['start_time']}.")
-            msg = "Booking confirmed (KEEP)"
+            msg = "Booking confirmed (KEEP); pending reschedule requests closed"
         elif action == "CANCEL":
             conn.execute("UPDATE bookings SET status='Cancelled', updated_at=? WHERE booking_id=?",
                          (now_str(now), booking_id))
