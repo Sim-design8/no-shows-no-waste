@@ -13,6 +13,8 @@ DB = os.environ.get("NSNW_DB", be.DB_PATH)
 be.init_db(DB)
 HOST_NAME, HOST_EMAIL = "Facilities Desk", "facilities.desk@example.com"
 DEFAULT_MODEL = "gemini-2.5-flash"
+# Keep GenAI hidden by default; enable deliberately with NSNW_ENABLE_GEMINI=true.
+ENABLE_GEMINI = os.environ.get("NSNW_ENABLE_GEMINI", "false").strip().lower() == "true"
 
 # ---------- visual system ----------
 st.markdown("""
@@ -102,12 +104,16 @@ with st.sidebar:
     now=datetime.combine(demo_day,demo_clock)
     st.caption("Confirmation window: opens 3 hours before booking; deadline is 2 hours before.")
     if view.startswith("Coordinator"):
-        try:
-            key_default = st.secrets["GEMINI_API_KEY"]
-        except Exception:
-            key_default = os.environ.get("GEMINI_API_KEY", "")
-        api_key=st.text_input("Gemini API key (optional)",value=key_default,type="password")
-        model=st.text_input("Gemini model",DEFAULT_MODEL)
+        if ENABLE_GEMINI:
+            try:
+                key_default = st.secrets["GEMINI_API_KEY"]
+            except Exception:
+                key_default = os.environ.get("GEMINI_API_KEY", "")
+            api_key=st.text_input("Gemini API key (optional)",value=key_default,type="password")
+            model=st.text_input("Gemini model",DEFAULT_MODEL)
+        else:
+            api_key=""
+            model=DEFAULT_MODEL
         st.divider()
         upload=st.file_uploader("Import calendar CSV",type=["csv"])
         if upload and st.button("Import bookings from CSV",use_container_width=True):
