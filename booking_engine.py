@@ -537,13 +537,8 @@ def process_deadlines(now, db=DB_PATH):
     conn = connect(db)
     try:
         conn.execute("BEGIN IMMEDIATE")
-        rows = conn.execute(
-            "SELECT * FROM bookings WHERE status='Active' AND reminder_sent_at IS NOT NULL "
-            "AND respond_by IS NOT NULL AND respond_by <= ? "
-            "AND NOT EXISTS (SELECT 1 FROM reschedule_requests rr "
-            "WHERE rr.booking_id=bookings.booking_id AND rr.status='Pending')",
-            (now_str(now),)
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM bookings WHERE status='Active' AND reminder_sent_at IS NOT NULL "
+                            "AND respond_by IS NOT NULL AND respond_by <= ?", (now_str(now),)).fetchall()
         for r in rows:
             conn.execute("UPDATE bookings SET status='Released', updated_at=? WHERE booking_id=?",
                          (now_str(now), r["booking_id"]))
