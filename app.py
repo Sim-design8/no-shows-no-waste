@@ -13,8 +13,6 @@ DB = os.environ.get("NSNW_DB", be.DB_PATH)
 be.init_db(DB)
 HOST_NAME, HOST_EMAIL = "Facilities Desk", "facilities.desk@example.com"
 DEFAULT_MODEL = "gemini-2.5-flash"
-# Keep GenAI hidden by default; enable deliberately with NSNW_ENABLE_GEMINI=true.
-ENABLE_GEMINI = os.environ.get("NSNW_ENABLE_GEMINI", "false").strip().lower() == "true"
 
 # ---------- visual system ----------
 st.markdown("""
@@ -104,16 +102,12 @@ with st.sidebar:
     now=datetime.combine(demo_day,demo_clock)
     st.caption("Confirmation window: opens 3 hours before booking; deadline is 2 hours before.")
     if view.startswith("Coordinator"):
-        if ENABLE_GEMINI:
-            try:
-                key_default = st.secrets["GEMINI_API_KEY"]
-            except Exception:
-                key_default = os.environ.get("GEMINI_API_KEY", "")
-            api_key=st.text_input("Gemini API key (optional)",value=key_default,type="password")
-            model=st.text_input("Gemini model",DEFAULT_MODEL)
-        else:
-            api_key=""
-            model=DEFAULT_MODEL
+        try:
+            key_default = st.secrets["GEMINI_API_KEY"]
+        except Exception:
+            key_default = os.environ.get("GEMINI_API_KEY", "")
+        api_key=st.text_input("Gemini API key (optional)",value=key_default,type="password")
+        model=st.text_input("Gemini model",DEFAULT_MODEL)
         st.divider()
         upload=st.file_uploader("Import calendar CSV",type=["csv"])
         if upload and st.button("Import bookings from CSV",use_container_width=True):
@@ -131,11 +125,31 @@ with st.sidebar:
     st.caption("Prototype: CSV calendar input and simulated emails. Demo data is synthetic.")
 
 if not be.list_bookings(DB): seed_demo(demo_day)
+# Process the confirmation workflow whenever the app executes/reruns.
+# This is NOT a background scheduler: due events are processed only while the app runs.
+all_rows=be.list_bookings(DB)
+auto_reminders=[]
+for _b in all_rows:
+    if _b.get("status") != "Active" or _b.get("reminder_sent_at"):
+        continue
+    _opens, _deadline = be.checkin_window(_b)
+    if _opens <= now < _deadline:
+        _body, _source = reminder_text(_b, _deadline, api_key if view.startswith("Coordinator") else "", model)
+        _ok, _msg = be.send_reminder(
+            _b["booking_id"],
+            f"Please confirm your booking for {_b['space']}",
+            _body,
+            now,
+            DB
+        )
+        if _ok:
+            auto_reminders.append(_b["booking_id"])
 released=be.process_deadlines(now,DB)
 all_rows=be.list_bookings(DB)
 if "notice" in st.session_state:
     st.success(st.session_state.pop("notice"))
-if released: st.warning("Automatically released at deadline: "+", ".join(released))
+if auto_reminders: st.info("Automatic check-in reminder generated at T−3 for: "+", ".join(auto_reminders)+" (simulated notification)")
+if released: st.warning("Automatically released at T−2 after no response: "+", ".join(released))
 
 # ---------- booker experience ----------
 if view.startswith("Booker"):
@@ -151,58 +165,40 @@ if view.startswith("Booker"):
     left,right=st.columns([1,1.2],gap="large")
     with left:
         st.markdown("### ＋ Book a space")
-        person=st.text_input("Your name",value=next((b['booker_name'] for b in my),"Demo Employee"))
-        email=st.text_input("Your email",value=selected_email or "employee@example.com",disabled=True,help="This email is locked to the selected demo employee.")
-        book_date=st.date_input("Select booking date",value=demo_day,key="book_date")
-        c1,c2=st.columns(2)
-        start=c1.text_input("Start time (HH:MM)","10:00",key="availability_start")
-        end=c2.text_input("End time (HH:MM)","11:00",key="availability_end")
-        spaces=be.list_spaces(DB) or ["Desk D-1"]
-        try:
-            available_spaces=[sp for sp in spaces if be.is_available(sp,book_date.isoformat(),start,end,DB)]
-            st.markdown("#### Available for your selected date and time")
-            if available_spaces:
-                st.success(f"{len(available_spaces)} spaces available")
-                st.write(" · ".join(available_spaces))
-                with st.form("booker_new_booking",clear_on_submit=True):
-                    space=st.selectbox("Choose an available desk or meeting room",available_spaces)
-                    submit=st.form_submit_button("Confirm booking",use_container_width=True)
-                    if submit:
-                        ok,msg=be.create_booking(dict(booking_id=f"B{random.randint(1000,9999)}",space=space,booking_date=book_date.isoformat(),start_time=start,end_time=end,
-                          coordinator_name=HOST_NAME,coordinator_email=HOST_EMAIL,booker_name=person,booker_email=email,team="-"),DB)
-                        if ok: st.session_state.notice=f"Booking confirmed: {space}, {book_date}, {start}–{end}."; st.rerun()
-                        st.error(msg)
-            else:
-                st.warning("No desks or meeting rooms are available for this date and time. Try another time.")
-        except ValueError as ex:
-            st.error(f"Please enter a valid time range: {ex}")
+        with st.form("booker_new_booking",clear_on_submit=True):
+            person=st.text_input("Your name",value=next((b['booker_name'] for b in my),"Demo Employee"))
+            email=st.text_input("Your email",value=selected_email or "employee@example.com")
+            book_date=st.date_input("Booking date",value=demo_day,key="book_date")
+            spaces=be.list_spaces(DB) or ["Desk D-1"]
+            space=st.selectbox("Choose a space",spaces)
+            c1,c2=st.columns(2); start=c1.text_input("Start (HH:MM)","10:00"); end=c2.text_input("End (HH:MM)","11:00")
+            submit=st.form_submit_button("Check availability & confirm",use_container_width=True)
+            if submit:
+                ok,msg=be.create_booking(dict(booking_id=f"B{random.randint(1000,9999)}",space=space,booking_date=book_date.isoformat(),start_time=start,end_time=end,
+                  coordinator_name=HOST_NAME,coordinator_email=HOST_EMAIL,booker_name=person,booker_email=email,team="-"),DB)
+                if ok: st.session_state.notice=f"Booking confirmed: {space}, {book_date}, {start}–{end}."; st.rerun()
+                st.error(msg)
+                try:
+                    alts=be.suggest_alternatives(space,book_date.isoformat(),start,end,DB)
+                    if alts: st.info("Try instead: "+" · ".join(f"{x['space']} {x['start']}–{x['end']}" for x in alts))
+                except ValueError: pass
     with right:
         st.markdown("### My booking status")
         if not my: st.info("No bookings for this requester yet.")
-        pending_by_booking = {q["booking_id"]: q for q in be.pending_requests(DB)}
         for b in sorted(my,key=lambda x:(x['booking_date'],x['start_time'])):
             with st.container(border=True):
                 st.markdown(f"**{b['space']}**  ·  {b['booking_date']}  ·  {b['start_time']}–{b['end_time']}")
                 st.caption(f"Booking {b['booking_id']} · Host: {b['coordinator_name']} · Status: {b['status']}")
-                pending_request = pending_by_booking.get(b["booking_id"])
-                if pending_request:
-                    st.warning(
-                        f"Reschedule request #{pending_request['request_id']} is awaiting coordinator approval "
-                        f"for {pending_request['new_date']} · {pending_request['new_start']}–{pending_request['new_end']}. "
-                        "Your original booking remains active."
-                    )
                 if b['status'] in be.LIVE:
                     if b['reminder_sent_at']:
                         st.warning(f"Reminder received · Please respond by {b['respond_by'][-5:] if b['respond_by'] else 'the deadline'}")
                     a,bcol,cc=st.columns(3)
                     if a.button("✓ KEEP",key=f"keep_{b['booking_id']}",use_container_width=True):
                         ok,msg=be.respond(b['booking_id'],"KEEP",now,DB); st.session_state.notice=msg; st.rerun()
-                    if bcol.button("↗ RESCHEDULE",key=f"res_{b['booking_id']}",use_container_width=True,
-                                   disabled=pending_request is not None):
-                        st.session_state[f"show_res_{b['booking_id']}"]=not st.session_state.get(f"show_res_{b['booking_id']}",False)
+                    if bcol.button("↗ RESCHEDULE",key=f"res_{b['booking_id']}",use_container_width=True): st.session_state[f"show_res_{b['booking_id']}"]=not st.session_state.get(f"show_res_{b['booking_id']}",False)
                     if cc.button("✕ CANCEL",key=f"cancel_{b['booking_id']}",use_container_width=True):
                         ok,msg=be.respond(b['booking_id'],"CANCEL",now,DB); st.session_state.notice=msg; st.rerun()
-                    if st.session_state.get(f"show_res_{b['booking_id']}",False) and not pending_request:
+                    if st.session_state.get(f"show_res_{b['booking_id']}",False):
                         with st.form(f"res_form_{b['booking_id']}"):
                             nd=st.date_input("New date",value=demo_day,key=f"nd_{b['booking_id']}")
                             x,y=st.columns(2); ns=x.text_input("New start","14:00",key=f"ns_{b['booking_id']}"); ne=y.text_input("New end","15:00",key=f"ne_{b['booking_id']}")
@@ -236,40 +232,34 @@ else:
             st.dataframe(df[["booking_id","space","time","coordinator_name","booker_name","booker_email","status"]].rename(columns={"coordinator_name":"Host","booker_name":"Requester","booker_email":"Requester email"}),use_container_width=True,hide_index=True)
         else: st.info("No bookings for the selected demo date.")
         st.markdown("### Booking status")
-        status_counts={k:v for k,v in counts.items() if k!="Pending reschedules"}
-        status_cols=st.columns(max(1,len(status_counts)))
-        for col,(status,count) in zip(status_cols,status_counts.items()):
-            col.metric(status,count)
+        st.write({k:v for k,v in counts.items() if k!="Pending reschedules"})
+        st.markdown("### Booking intent vs. actual-use evidence")
+        st.caption("A booking is intent, not proof of desk/room use. Upload an optional evidence CSV keyed by booking_id. This prototype does not connect to badge, Wi-Fi, sensor or access-control systems.")
+        evidence_file = st.file_uploader("Optional actual-use evidence CSV", type=["csv"], key="occupancy_evidence")
+        if evidence_file:
+            try:
+                ev = pd.read_csv(evidence_file)
+                required = {"booking_id", "usage_signal"}
+                if not required.issubset(set(ev.columns)):
+                    st.error("Evidence CSV must include booking_id and usage_signal columns.")
+                else:
+                    joined = pd.DataFrame(today).merge(ev, on="booking_id", how="left") if today else pd.DataFrame()
+                    if not joined.empty:
+                        joined["evidence_status"] = joined["usage_signal"].fillna("Not supplied")
+                        st.dataframe(joined[["booking_id","space","booker_name","start_time","status","evidence_status"]], use_container_width=True, hide_index=True)
+                    st.caption("Evidence is manually supplied for demonstration; it is not independently verified.")
+            except Exception as ex:
+                st.error(f"Could not read evidence file: {ex}")
     with tab2:
         st.caption("Risk is a transparent heuristic to prioritise coordinator attention; it does not itself cancel bookings.")
         if risk_rows:
             rq=pd.DataFrame(risk_rows).sort_values("risk",ascending=False)
             st.dataframe(rq[["booking_id","booker_name","booker_email","space","start_time","risk","band","reason","reminder_sent_at"]],use_container_width=True,hide_index=True,
               column_config={"risk":st.column_config.ProgressColumn("Risk score",min_value=0,max_value=100,format="%d")})
-            candidates=[]
-            for r in risk_rows:
-                if r['band']=="Low" or r['reminder_sent_at']:
-                    continue
-                opens,deadline=be.checkin_window(r)
-                if opens <= now < deadline:
-                    candidates.append(r)
-            if candidates:
-                st.markdown("### Send a confirmation reminder")
-                labels={b['booking_id']:f"{b['booking_id']} · {b['booker_name']} · {b['space']} · {b['start_time']} · {b['band']} ({b['risk']})" for b in candidates}
-                chosen=st.selectbox("Select booking",list(labels),format_func=labels.get)
-                bsel=be.get_booking(chosen,DB); _,deadline=be.checkin_window(bsel)
-                st.caption(f"To: {bsel['booker_email']}  ·  From: {bsel['coordinator_email']}  ·  Deadline: {deadline:%H:%M}")
-                if st.button("✨ Draft reminder",type="primary"):
-                    body,source=reminder_text(bsel,deadline,api_key,model); st.session_state[f"draft_{chosen}"]=(body,source)
-                if f"draft_{chosen}" in st.session_state:
-                    body,source=st.session_state[f"draft_{chosen}"]; st.caption(source)
-                    edited=st.text_area("Review reminder before sending",body,key=f"edit_{chosen}")
-                    subject=f"Please confirm your booking for {bsel['space']}"
-                    if st.button("Send reminder (simulated)"):
-                        ok,msg=be.send_reminder(chosen,subject,edited,now,DB)
-                        if ok: st.session_state.notice=msg; st.rerun()
-                        st.error(msg)
-            else: st.info("No medium/high-risk bookings are currently eligible for a reminder. The reminder window opens 3 hours before start and closes 2 hours before start.")
+            st.info("Reminder dispatch is system-triggered at T−3 when this app executes. The coordinator monitors status; they do not initiate reminders.")
+            if not any(r.get("reminder_sent_at") for r in risk_rows):
+                st.caption("No reminder has been generated in the current check-in window. Move the demo clock to T−3 or later (but before T−2) and rerun.")
+            st.caption("Gemini, when configured, drafts the reminder wording only. The booking rules—not AI—control timing and release.")
         else: st.info("No active bookings for this date.")
     with tab3:
         pending=be.pending_requests(DB)
@@ -290,4 +280,4 @@ else:
         else: st.info("No notifications yet.")
 
 with st.expander("Prototype scope & transparency"):
-    st.markdown("- Coordinator is the booking host; booker email identifies the requester.\n- CSV substitutes for Outlook/Google Calendar integration.\n- Email notifications are simulated; no real messages are sent.\n- Risk score is rule-based; Gemini only drafts reminder text.\n- SQLite is used for this college prototype; production would need persistent hosted storage, authentication and calendar/email integrations.\n- All seeded demo people and bookings are synthetic.")
+    st.markdown("- Coordinator is the booking host; booker email identifies the requester.\n- CSV substitutes for Outlook/Google Calendar integration.\n- Email notifications are simulated; no real messages are sent.\n- Booking records show intent; optional CSV evidence can be used to illustrate actual-use signals. No badge/Wi-Fi/sensor integrations are implemented.\n- Risk score is rule-based; Gemini only drafts reminder text.\n- Reminder and release deadlines are processed when the Streamlit app executes/reruns; there is no always-on background scheduler.\n- SQLite is used for this college prototype; production would need persistent hosted storage, authentication and calendar/email integrations.\n- All seeded demo people and bookings are synthetic.")
