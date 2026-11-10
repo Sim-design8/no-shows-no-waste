@@ -151,23 +151,31 @@ if view.startswith("Booker"):
     left,right=st.columns([1,1.2],gap="large")
     with left:
         st.markdown("### ＋ Book a space")
-        with st.form("booker_new_booking",clear_on_submit=True):
-            person=st.text_input("Your name",value=next((b['booker_name'] for b in my),"Demo Employee"))
-            email=st.text_input("Your email",value=selected_email or "employee@example.com",disabled=True,help="This email is locked to the selected demo employee.")
-            book_date=st.date_input("Booking date",value=demo_day,key="book_date")
-            spaces=be.list_spaces(DB) or ["Desk D-1"]
-            space=st.selectbox("Choose a space",spaces)
-            c1,c2=st.columns(2); start=c1.text_input("Start (HH:MM)","10:00"); end=c2.text_input("End (HH:MM)","11:00")
-            submit=st.form_submit_button("Check availability & confirm",use_container_width=True)
-            if submit:
-                ok,msg=be.create_booking(dict(booking_id=f"B{random.randint(1000,9999)}",space=space,booking_date=book_date.isoformat(),start_time=start,end_time=end,
-                  coordinator_name=HOST_NAME,coordinator_email=HOST_EMAIL,booker_name=person,booker_email=email,team="-"),DB)
-                if ok: st.session_state.notice=f"Booking confirmed: {space}, {book_date}, {start}–{end}."; st.rerun()
-                st.error(msg)
-                try:
-                    alts=be.suggest_alternatives(space,book_date.isoformat(),start,end,DB)
-                    if alts: st.info("Try instead: "+" · ".join(f"{x['space']} {x['start']}–{x['end']}" for x in alts))
-                except ValueError: pass
+        person=st.text_input("Your name",value=next((b['booker_name'] for b in my),"Demo Employee"))
+        email=st.text_input("Your email",value=selected_email or "employee@example.com",disabled=True,help="This email is locked to the selected demo employee.")
+        book_date=st.date_input("Select booking date",value=demo_day,key="book_date")
+        c1,c2=st.columns(2)
+        start=c1.text_input("Start time (HH:MM)","10:00",key="availability_start")
+        end=c2.text_input("End time (HH:MM)","11:00",key="availability_end")
+        spaces=be.list_spaces(DB) or ["Desk D-1"]
+        try:
+            available_spaces=[sp for sp in spaces if be.is_available(sp,book_date.isoformat(),start,end,DB)]
+            st.markdown("#### Available for your selected date and time")
+            if available_spaces:
+                st.success(f"{len(available_spaces)} spaces available")
+                st.write(" · ".join(available_spaces))
+                with st.form("booker_new_booking",clear_on_submit=True):
+                    space=st.selectbox("Choose an available desk or meeting room",available_spaces)
+                    submit=st.form_submit_button("Confirm booking",use_container_width=True)
+                    if submit:
+                        ok,msg=be.create_booking(dict(booking_id=f"B{random.randint(1000,9999)}",space=space,booking_date=book_date.isoformat(),start_time=start,end_time=end,
+                          coordinator_name=HOST_NAME,coordinator_email=HOST_EMAIL,booker_name=person,booker_email=email,team="-"),DB)
+                        if ok: st.session_state.notice=f"Booking confirmed: {space}, {book_date}, {start}–{end}."; st.rerun()
+                        st.error(msg)
+            else:
+                st.warning("No desks or meeting rooms are available for this date and time. Try another time.")
+        except ValueError as ex:
+            st.error(f"Please enter a valid time range: {ex}")
     with right:
         st.markdown("### My booking status")
         if not my: st.info("No bookings for this requester yet.")
