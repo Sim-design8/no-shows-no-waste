@@ -153,7 +153,7 @@ if view.startswith("Booker"):
         st.markdown("### ＋ Book a space")
         with st.form("booker_new_booking",clear_on_submit=True):
             person=st.text_input("Your name",value=next((b['booker_name'] for b in my),"Demo Employee"))
-            email=st.text_input("Your email",value=selected_email or "employee@example.com")
+            email=st.text_input("Your email",value=selected_email or "employee@example.com",disabled=True,help="This email is locked to the selected demo employee.")
             book_date=st.date_input("Booking date",value=demo_day,key="book_date")
             spaces=be.list_spaces(DB) or ["Desk D-1"]
             space=st.selectbox("Choose a space",spaces)
