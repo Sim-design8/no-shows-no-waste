@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS bookings(
   status TEXT NOT NULL DEFAULT 'Active',
   past_bookings INTEGER DEFAULT 0, past_no_shows INTEGER DEFAULT 0,
   lead_days INTEGER DEFAULT 0, recurring INTEGER DEFAULT 0,
-  reminder_sent_at TEXT, respond_by TEXT, updated_at TEXT);
+  reminder_sent_at TEXT, respond_by TEXT, updated_at TEXT,
+  risk_review_eligible INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS spaces(space TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS reschedule_requests(
   request_id INTEGER PRIMARY KEY AUTOINCREMENT, booking_id TEXT NOT NULL,
@@ -63,6 +64,11 @@ def init_db(db=DB_PATH):
     conn = connect(db)
     try:
         conn.executescript(SCHEMA)
+        # Existing SQLite databases need this additive migration; new databases
+        # already receive the column from SCHEMA above.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(bookings)")}
+        if "risk_review_eligible" not in columns:
+            conn.execute("ALTER TABLE bookings ADD COLUMN risk_review_eligible INTEGER NOT NULL DEFAULT 0")
         # Migration safety: older app versions could have created several pending
         # requests for one booking. Keep the newest and mark older ones superseded.
         conn.execute(
@@ -551,6 +557,26 @@ def process_deadlines(now, db=DB_PATH):
     finally:
         conn.close()
     return released
+
+
+def risk_review_queue(db=DB_PATH, date_s=None):
+    """Return only bookings released for no response at T−2 and eligible for coordinator risk review.
+
+    A KEEP response changes the booking to Confirmed, and a CANCEL response
+    releases it without setting this flag. Neither enters this queue.
+    """
+    conn = connect(db)
+    try:
+        sql = ("SELECT * FROM bookings WHERE status='Released' "
+               "AND risk_review_eligible=1")
+        args = []
+        if date_s:
+            sql += " AND booking_date=?"
+            args.append(date_s)
+        sql += " ORDER BY booking_date,start_time,space"
+        return [dict(r) for r in conn.execute(sql, args)]
+    finally:
+        conn.close()
 
 
 def notifications(db=DB_PATH, limit=100):
