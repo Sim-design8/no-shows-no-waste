@@ -226,6 +226,53 @@ def test_keep_closes_pending_reschedule_request():
     assert booking["status"] == "Confirmed"
 
 
+def test_csv_import_preserves_confirmed_status_and_parses_boolean_values():
+    db = fresh()
+    confirmed = {**bk("CONF", space="Desk D-20"), "status": "Confirmed", "recurring": "False",
+                 "past_bookings": "3", "past_no_shows": "1", "lead_days": "2"}
+    active = {**bk("ACT", space="Desk D-21"), "status": "Active", "recurring": "true"}
+    report = be.import_bookings(pd.DataFrame([confirmed, active]), db)
+    assert report["imported"] == ["CONF", "ACT"]
+    assert be.get_booking("CONF", db)["status"] == "Confirmed"
+    assert be.get_booking("CONF", db)["recurring"] == 0
+    assert be.get_booking("ACT", db)["recurring"] == 1
+    assert be.get_booking("CONF", db)["past_bookings"] == 3
+
+
+def test_csv_import_rejects_invalid_numeric_and_boolean_rows_without_aborting():
+    db = fresh()
+    bad_number = {**bk("BADNUM", space="Desk D-22"), "past_no_shows": "many"}
+    bad_bool = {**bk("BADBOOL", space="Desk D-23"), "recurring": "sometimes"}
+    good = bk("GOOD", space="Desk D-24")
+    report = be.import_bookings(pd.DataFrame([bad_number, bad_bool, good]), db)
+    assert report["imported"] == ["GOOD"]
+    assert {r[0] for r in report["rejected"]} == {"BADNUM", "BADBOOL"}
+
+
+def test_send_reminder_is_idempotent_and_rejects_confirmed_booking():
+    db = fresh()
+    be.create_booking({**bk("A", start="12:00", end="13:00"), "status": "Active"}, db)
+    first = be.send_reminder("A", "subject", "body", at(9, 10), db)
+    second = be.send_reminder("A", "subject", "body", at(9, 11), db)
+    assert first[0]
+    assert not second[0] and "already been sent" in second[1]
+    assert len([n for n in be.notifications(db) if n["kind"] == "reminder"]) == 1
+    be.create_booking({**bk("C", space="Desk D-25", start="12:00", end="13:00"), "status": "Confirmed"}, db)
+    assert not be.send_reminder("C", "subject", "body", at(9, 10), db)[0]
+
+
+def test_rejecting_reschedule_does_not_downgrade_confirmed_booking():
+    db = fresh()
+    be.create_booking({**bk("A"), "status": "Confirmed"}, db)
+    assert be.request_reschedule("A", D, "14:00", "15:00", at(9), db)[0]
+    request = be.pending_requests(db)[0]
+    assert be.reject_reschedule(request["request_id"], at(9, 10), db)[0]
+    booking = be.get_booking("A", db)
+    assert booking["status"] == "Confirmed"
+    assert booking["reminder_sent_at"] is None
+    assert booking["respond_by"] is None
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
