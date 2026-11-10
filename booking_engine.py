@@ -62,6 +62,19 @@ def init_db(db=DB_PATH):
     conn = connect(db)
     try:
         conn.executescript(SCHEMA)
+        # Migration safety: older app versions could have created several pending
+        # requests for one booking. Keep the newest and mark older ones superseded.
+        conn.execute(
+            "UPDATE reschedule_requests SET status='Superseded' "
+            "WHERE status='Pending' AND request_id NOT IN "
+            "(SELECT MAX(request_id) FROM reschedule_requests "
+            "WHERE status='Pending' GROUP BY booking_id)"
+        )
+        # Database-level protection against rapid/replayed/concurrent submissions.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_one_pending_reschedule_per_booking "
+            "ON reschedule_requests(booking_id) WHERE status='Pending'"
+        )
     finally:
         conn.close()
 
@@ -349,6 +362,20 @@ def request_reschedule(booking_id, new_date, new_start, new_end, now, db=DB_PATH
         if not r or r["status"] not in LIVE:
             conn.execute("ROLLBACK")
             return False, "Booking is not active"
+
+        # Idempotency: repeated clicks/retries for the same booking reuse the
+        # existing pending request rather than creating another approval card.
+        existing = conn.execute(
+            "SELECT request_id,new_date,new_start,new_end FROM reschedule_requests "
+            "WHERE booking_id=? AND status='Pending' ORDER BY request_id DESC LIMIT 1",
+            (booking_id,)
+        ).fetchone()
+        if existing:
+            conn.execute("COMMIT")
+            return True, (
+                f"A reschedule request is already pending (request #{existing['request_id']}). "
+                "Your original booking remains active; no duplicate was created."
+            )
 
         available = _conflict(conn, r["space"], d, s, e, exclude_id=booking_id) is None
         cur = conn.execute(
