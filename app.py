@@ -165,20 +165,30 @@ if view.startswith("Booker"):
     with right:
         st.markdown("### My booking status")
         if not my: st.info("No bookings for this requester yet.")
+        pending_by_booking = {q["booking_id"]: q for q in be.pending_requests(DB)}
         for b in sorted(my,key=lambda x:(x['booking_date'],x['start_time'])):
             with st.container(border=True):
                 st.markdown(f"**{b['space']}**  ·  {b['booking_date']}  ·  {b['start_time']}–{b['end_time']}")
                 st.caption(f"Booking {b['booking_id']} · Host: {b['coordinator_name']} · Status: {b['status']}")
+                pending_request = pending_by_booking.get(b["booking_id"])
+                if pending_request:
+                    st.warning(
+                        f"Reschedule request #{pending_request['request_id']} is awaiting coordinator approval "
+                        f"for {pending_request['new_date']} · {pending_request['new_start']}–{pending_request['new_end']}. "
+                        "Your original booking remains active."
+                    )
                 if b['status'] in be.LIVE:
                     if b['reminder_sent_at']:
                         st.warning(f"Reminder received · Please respond by {b['respond_by'][-5:] if b['respond_by'] else 'the deadline'}")
                     a,bcol,cc=st.columns(3)
                     if a.button("✓ KEEP",key=f"keep_{b['booking_id']}",use_container_width=True):
                         ok,msg=be.respond(b['booking_id'],"KEEP",now,DB); st.session_state.notice=msg; st.rerun()
-                    if bcol.button("↗ RESCHEDULE",key=f"res_{b['booking_id']}",use_container_width=True): st.session_state[f"show_res_{b['booking_id']}"]=not st.session_state.get(f"show_res_{b['booking_id']}",False)
+                    if bcol.button("↗ RESCHEDULE",key=f"res_{b['booking_id']}",use_container_width=True,
+                                   disabled=pending_request is not None):
+                        st.session_state[f"show_res_{b['booking_id']}"]=not st.session_state.get(f"show_res_{b['booking_id']}",False)
                     if cc.button("✕ CANCEL",key=f"cancel_{b['booking_id']}",use_container_width=True):
                         ok,msg=be.respond(b['booking_id'],"CANCEL",now,DB); st.session_state.notice=msg; st.rerun()
-                    if st.session_state.get(f"show_res_{b['booking_id']}",False):
+                    if st.session_state.get(f"show_res_{b['booking_id']}",False) and not pending_request:
                         with st.form(f"res_form_{b['booking_id']}"):
                             nd=st.date_input("New date",value=demo_day,key=f"nd_{b['booking_id']}")
                             x,y=st.columns(2); ns=x.text_input("New start","14:00",key=f"ns_{b['booking_id']}"); ne=y.text_input("New end","15:00",key=f"ne_{b['booking_id']}")
@@ -212,7 +222,10 @@ else:
             st.dataframe(df[["booking_id","space","time","coordinator_name","booker_name","booker_email","status"]].rename(columns={"coordinator_name":"Host","booker_name":"Requester","booker_email":"Requester email"}),use_container_width=True,hide_index=True)
         else: st.info("No bookings for the selected demo date.")
         st.markdown("### Booking status")
-        st.write({k:v for k,v in counts.items() if k!="Pending reschedules"})
+        status_counts={k:v for k,v in counts.items() if k!="Pending reschedules"}
+        status_cols=st.columns(max(1,len(status_counts)))
+        for col,(status,count) in zip(status_cols,status_counts.items()):
+            col.metric(status,count)
     with tab2:
         st.caption("Risk is a transparent heuristic to prioritise coordinator attention; it does not itself cancel bookings.")
         if risk_rows:
