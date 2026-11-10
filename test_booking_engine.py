@@ -159,6 +159,31 @@ def test_reject_keeps_original_and_applies_no_response_policy():
     assert be.respond("Z", "KEEP", at(9, 45), db)[0] and be.get_booking("Z", db)["status"] == "Confirmed"
 
 
+def test_risk_review_queue_only_includes_t2_no_response_releases():
+    db = fresh()
+    for booking_id, space in (("EARLY", "Desk D-31"), ("KEEP", "Desk D-32"),
+                              ("CANCEL", "Desk D-33"), ("NO_REPLY", "Desk D-34")):
+        be.create_booking(bk(booking_id, space=space, start="12:00", end="13:00"), db)
+
+    # Confirmed before the check-in window: no reminder and no risk review.
+    assert be.respond("EARLY", "KEEP", at(8, 0), db)[0]
+    # KEEP during the T−3 to T−2 window: retained and excluded.
+    assert be.send_reminder("KEEP", "s", "b", at(9, 10), db)[0]
+    assert be.respond("KEEP", "KEEP", at(9, 30), db)[0]
+    # CANCEL during the window: released by the employee, not risk-review eligible.
+    assert be.send_reminder("CANCEL", "s", "b", at(9, 10), db)[0]
+    assert be.respond("CANCEL", "CANCEL", at(9, 30), db)[0]
+    # No response by T−2: automatically released and queued for coordinator review.
+    assert be.send_reminder("NO_REPLY", "s", "b", at(9, 10), db)[0]
+    assert be.process_deadlines(at(10, 0), db) == ["NO_REPLY"]
+
+    assert be.get_booking("EARLY", db)["status"] == "Confirmed"
+    assert be.get_booking("KEEP", db)["status"] == "Confirmed"
+    assert be.get_booking("CANCEL", db)["status"] == "Cancelled"
+    assert be.get_booking("NO_REPLY", db)["status"] == "Released"
+    assert [b["booking_id"] for b in be.risk_review_queue(db)] == ["NO_REPLY"]
+
+
 def test_alternatives():
     db = fresh()
     be.create_booking(bk("A", space="Desk D-12"), db)

@@ -16,7 +16,7 @@ A classroom prototype for reducing unused desk and meeting-room bookings in a hy
 
 ### Facilities / Workplace Coordinator
 - Review flagged bookings and inspect the reasons behind each flag.
-- The MVP risk score is a transparent, rule-based heuristic. It is advisory only and does not itself cancel or release a booking.
+- The MVP risk score is a transparent, rule-based heuristic. It is advisory only and does not itself cancel or release a booking. The no-response risk-review queue is populated only by bookings automatically released at T−2; non-response is a review signal, not proof of a no-show.
 - Reminder and booking-response events are simulated; no real email, Teams, Slack or calendar messages are sent.
 
 ## Separate check-in and release workflow
@@ -24,9 +24,9 @@ A classroom prototype for reducing unused desk and meeting-room bookings in a hy
 Risk-based flagging and check-in-based release are separate mechanisms.
 
 - At **T−3 hours**, the check-in window opens. If the employee has not already selected KEEP/Confirmed or CANCEL, the app automatically records one simulated reminder and sets the response deadline to **T−2 hours**.
-- **KEEP** confirms and retains the booking. **CANCEL** releases it immediately.
+- **KEEP** confirms and retains the booking. **CANCEL** releases it immediately. Both responses are excluded from the no-response risk-review queue, including KEEP responses received between T−3 and T−2.
 - **RESCHEDULE** submits a request for Coordinator approval; the original booking remains protected while the request is pending. The handling of a request still pending at the T−2 deadline remains a product-policy decision and must not be silently assumed to count as either a response or no response.
-- At **T−2 hours**, an unanswered booking is automatically marked Released, the Coordinator is notified, and availability for that exact desk/date/time is updated so another employee can book it.
+- At **T−2 hours**, an unanswered booking is automatically marked Released, the Coordinator is notified, and availability for that exact desk/date/time is updated so another employee can book it. That automatic no-response release makes the booking eligible for the Coordinator's separate risk-review queue. A prior KEEP or CANCEL response does not enter that queue.
 - The Coordinator oversees bookings and reschedule decisions; they do not manually initiate automatic reminders or automatic releases.
 - Reminder and release processing occurs when the Streamlit app executes/reruns. There is no always-on background scheduler, so an idle app cannot guarantee exact wall-clock execution. Production requires a durable scheduled worker.
 
