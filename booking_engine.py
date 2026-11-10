@@ -333,25 +333,36 @@ def checkin_window(b):
 
 
 def send_reminder(booking_id, subject, body, now, db=DB_PATH):
-    """Coordinator sends a (simulated) reminder. Only allowed while the check-in window is open."""
-    b = get_booking(booking_id, db)
-    if not b or b["status"] != "Active":
-        return False, "Only active, unconfirmed bookings can be sent a reminder"
-    opens, deadline = checkin_window(b)
-    if now < opens:
-        return False, f"Check-in window opens at {opens.strftime('%H:%M')}"
-    if now >= deadline:
-        return False, f"Check-in deadline ({deadline.strftime('%H:%M')}) has passed"
+    """Atomically send one simulated reminder only for an eligible Active booking."""
     conn = connect(db)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM bookings WHERE booking_id=?", (booking_id,)).fetchone()
+        if not row or row["status"] != "Active":
+            conn.execute("ROLLBACK")
+            return False, "Only active, unconfirmed bookings can be sent a reminder"
+        b = dict(row)
+        if b["reminder_sent_at"]:
+            conn.execute("ROLLBACK")
+            return False, "A reminder has already been sent for this booking"
+        opens, deadline = checkin_window(b)
+        if now < opens:
+            conn.execute("ROLLBACK")
+            return False, f"Check-in window opens at {opens.strftime('%H:%M')}"
+        if now >= deadline:
+            conn.execute("ROLLBACK")
+            return False, f"Check-in deadline ({deadline.strftime('%H:%M')}) has passed"
         conn.execute("UPDATE bookings SET reminder_sent_at=?, respond_by=?, updated_at=? WHERE booking_id=?",
                      (now_str(now), now_str(deadline), now_str(now), booking_id))
         _notify(conn, now, booking_id, "reminder", b["booker_email"], subject, body)
         conn.execute("COMMIT")
+        return True, f"Reminder sent to {b['booker_email']}. Respond by {deadline.strftime('%H:%M')}."
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
-    return True, f"Reminder sent to {b['booker_email']}. Respond by {deadline.strftime('%H:%M')}."
 
 
 def respond(booking_id, action, now, db=DB_PATH, new_slot=None):
@@ -503,13 +514,17 @@ def reject_reschedule(request_id, now, db=DB_PATH):
             return False, "Request not found or already handled"
         r = conn.execute("SELECT * FROM bookings WHERE booking_id=?", (q["booking_id"],)).fetchone()
         conn.execute("UPDATE reschedule_requests SET status='Rejected' WHERE request_id=?", (request_id,))
-        if r and r["status"] in LIVE:
+        if r and r["status"] == "Active":
             _, deadline = checkin_window(dict(r))
             respond_by = max(deadline, now + timedelta(minutes=REJECT_GRACE_MIN))
-            conn.execute("UPDATE bookings SET status='Active', reminder_sent_at=?, respond_by=?, updated_at=? "
-                         "WHERE booking_id=?", (now_str(now), now_str(respond_by), now_str(now), r["booking_id"]))
+            conn.execute("UPDATE bookings SET reminder_sent_at=COALESCE(reminder_sent_at, ?), respond_by=?, updated_at=? "
+                         "WHERE booking_id=? AND status='Active'",
+                         (now_str(now), now_str(respond_by), now_str(now), r["booking_id"]))
             _notify(conn, now, r["booking_id"], "reschedule_rejected", r["booker_email"], "Reschedule not possible",
                     f"Your reschedule was rejected. Your original booking is still active. Please reply KEEP or CANCEL by {respond_by.strftime('%H:%M')}.")
+        elif r and r["status"] == "Confirmed":
+            _notify(conn, now, r["booking_id"], "reschedule_rejected", r["booker_email"], "Reschedule not possible",
+                    "Your reschedule was rejected. Your original booking remains confirmed; no further action is needed.")
         conn.execute("COMMIT")
         return True, "Rejected. Original booking retained; booker asked to KEEP or CANCEL"
     finally:
