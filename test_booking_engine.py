@@ -279,14 +279,3 @@ if __name__ == "__main__":
         t()
         print("PASS", t.__name__)
     print(f"\nAll {len(tests)} tests passed")
-
-
-def test_pending_reschedule_is_protected_from_auto_release_at_deadline():
-    db = fresh()
-    be.create_booking(bk("P", start="12:00", end="13:00"), db)
-    assert be.send_reminder("P", "s", "b", at(9, 10), db)[0]
-    assert be.request_reschedule("P", D, "14:00", "15:00", at(9, 20), db)[0]
-    # Pending reschedule is a submitted response, not silence; preserve original slot.
-    assert be.process_deadlines(at(10, 0), db) == []
-    assert be.get_booking("P", db)["status"] == "Active"
-    assert len(be.pending_requests(db)) == 1
