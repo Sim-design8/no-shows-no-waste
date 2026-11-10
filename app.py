@@ -232,7 +232,13 @@ else:
             rq=pd.DataFrame(risk_rows).sort_values("risk",ascending=False)
             st.dataframe(rq[["booking_id","booker_name","booker_email","space","start_time","risk","band","reason","reminder_sent_at"]],use_container_width=True,hide_index=True,
               column_config={"risk":st.column_config.ProgressColumn("Risk score",min_value=0,max_value=100,format="%d")})
-            candidates=[r for r in risk_rows if r['band']!="Low" and not r['reminder_sent_at']]
+            candidates=[]
+            for r in risk_rows:
+                if r['band']=="Low" or r['reminder_sent_at']:
+                    continue
+                opens,deadline=be.checkin_window(r)
+                if opens <= now < deadline:
+                    candidates.append(r)
             if candidates:
                 st.markdown("### Send a confirmation reminder")
                 labels={b['booking_id']:f"{b['booking_id']} · {b['booker_name']} · {b['space']} · {b['start_time']} · {b['band']} ({b['risk']})" for b in candidates}
@@ -249,7 +255,7 @@ else:
                         ok,msg=be.send_reminder(chosen,subject,edited,now,DB)
                         if ok: st.session_state.notice=msg; st.rerun()
                         st.error(msg)
-            else: st.info("No medium/high-risk bookings awaiting reminders. Adjust the demo clock to simulate the confirmation window.")
+            else: st.info("No medium/high-risk bookings are currently eligible for a reminder. The reminder window opens 3 hours before start and closes 2 hours before start.")
         else: st.info("No active bookings for this date.")
     with tab3:
         pending=be.pending_requests(DB)
