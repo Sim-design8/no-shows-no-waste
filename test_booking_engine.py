@@ -206,6 +206,26 @@ def test_new_request_allowed_after_previous_request_is_handled():
     assert len(be.pending_requests(db)) == 1
 
 
+def test_keep_closes_pending_reschedule_request():
+    db = fresh()
+    be.create_booking(bk("A"), db)
+    ok, msg = be.request_reschedule("A", D, "14:00", "15:00", at(9), db)
+    assert ok
+    request_id = be.pending_requests(db)[0]["request_id"]
+
+    kept, keep_msg = be.respond("A", "KEEP", at(9, 5), db)
+    assert kept and "pending reschedule requests closed" in keep_msg.lower()
+    assert be.get_booking("A", db)["status"] == "Confirmed"
+    assert be.pending_requests(db) == []
+
+    # A stale coordinator action must not move a booking after KEEP.
+    approved, approve_msg = be.approve_reschedule(request_id, at(9, 10), db)
+    assert not approved and "already handled" in approve_msg
+    booking = be.get_booking("A", db)
+    assert booking["start_time"] == "10:00"
+    assert booking["status"] == "Confirmed"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
