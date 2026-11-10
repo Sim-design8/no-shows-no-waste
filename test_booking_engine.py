@@ -169,6 +169,63 @@ def test_alternatives():
     assert all(a["space"] != "Desk D-13" or a["start"] != "10:00" for a in alts)
 
 
+def test_repeated_reschedule_submission_is_idempotent():
+    db = fresh()
+    be.create_booking(bk("A"), db)
+    first = be.request_reschedule("A", D, "14:00", "15:00", at(9), db)
+    second = be.request_reschedule("A", D, "14:00", "15:00", at(9, 1), db)
+    assert first[0] and second[0]
+    assert "already pending" in second[1]
+    assert len(be.pending_requests(db)) == 1
+    assert be.get_booking("A", db)["start_time"] == "10:00"
+
+
+def test_concurrent_reschedule_submissions_create_one_request():
+    db = fresh()
+    be.create_booking(bk("A"), db)
+    results = []
+
+    def submit(n):
+        results.append(be.request_reschedule("A", D, "14:00", "15:00", at(9, n), db))
+
+    threads = [threading.Thread(target=submit, args=(n,)) for n in range(10)]
+    [thread.start() for thread in threads]
+    [thread.join() for thread in threads]
+    assert all(ok for ok, _ in results), results
+    assert len(be.pending_requests(db)) == 1
+
+
+def test_new_request_allowed_after_previous_request_is_handled():
+    db = fresh()
+    be.create_booking(bk("A"), db)
+    be.request_reschedule("A", D, "14:00", "15:00", at(9), db)
+    q = be.pending_requests(db)[0]
+    assert be.reject_reschedule(q["request_id"], at(9, 10), db)[0]
+    ok, msg = be.request_reschedule("A", D, "16:00", "17:00", at(9, 20), db)
+    assert ok and "coordinator approval" in msg
+    assert len(be.pending_requests(db)) == 1
+
+
+def test_keep_closes_pending_reschedule_request():
+    db = fresh()
+    be.create_booking(bk("A"), db)
+    ok, msg = be.request_reschedule("A", D, "14:00", "15:00", at(9), db)
+    assert ok
+    request_id = be.pending_requests(db)[0]["request_id"]
+
+    kept, keep_msg = be.respond("A", "KEEP", at(9, 5), db)
+    assert kept and "pending reschedule requests closed" in keep_msg.lower()
+    assert be.get_booking("A", db)["status"] == "Confirmed"
+    assert be.pending_requests(db) == []
+
+    # A stale coordinator action must not move a booking after KEEP.
+    approved, approve_msg = be.approve_reschedule(request_id, at(9, 10), db)
+    assert not approved and "already handled" in approve_msg
+    booking = be.get_booking("A", db)
+    assert booking["start_time"] == "10:00"
+    assert booking["status"] == "Confirmed"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

@@ -7,8 +7,9 @@ Rules implemented (see PRD):
 - The availability check and the save happen in ONE transaction (BEGIN IMMEDIATE), so two simultaneous
   requests cannot both take the same slot.
 - Check-in window: opens 3 h before start, closes (deadline) 2 h before start.
-- KEEP confirms; CANCEL releases immediately; RESCHEDULE auto-updates if the new slot is free, otherwise
-  goes to the coordinator, who approves (availability is re-checked) or rejects (original booking stays).
+- KEEP confirms; CANCEL releases immediately; RESCHEDULE always creates a coordinator approval request.
+  The original booking remains active until approval; availability is re-checked inside the approval transaction.
+  Repeated submissions reuse the existing pending request; only one pending request per booking is allowed.
 - A booking that was sent a reminder and is still unconfirmed at its response deadline is auto-released.
 
 Limit: SQLite transactions protect one database file. A multi-server production system would use
@@ -62,6 +63,19 @@ def init_db(db=DB_PATH):
     conn = connect(db)
     try:
         conn.executescript(SCHEMA)
+        # Migration safety: older app versions could have created several pending
+        # requests for one booking. Keep the newest and mark older ones superseded.
+        conn.execute(
+            "UPDATE reschedule_requests SET status='Superseded' "
+            "WHERE status='Pending' AND request_id NOT IN "
+            "(SELECT MAX(request_id) FROM reschedule_requests "
+            "WHERE status='Pending' GROUP BY booking_id)"
+        )
+        # Database-level protection against rapid/replayed/concurrent submissions.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_one_pending_reschedule_per_booking "
+            "ON reschedule_requests(booking_id) WHERE status='Pending'"
+        )
     finally:
         conn.close()
 
@@ -310,11 +324,14 @@ def respond(booking_id, action, now, db=DB_PATH, new_slot=None):
             conn.execute("ROLLBACK")
             return False, "Booking is not active"
         if action == "KEEP":
+            # KEEP settles the original booking, so any outstanding reschedule
+            # approval must be closed to prevent a later approval moving it.
+            _close_requests(conn, booking_id)
             conn.execute("UPDATE bookings SET status='Confirmed', updated_at=? WHERE booking_id=?",
                          (now_str(now), booking_id))
             _notify(conn, now, booking_id, "keep", r["coordinator_email"], f"{r['booker_name']} kept {r['space']}",
                     f"{r['booker_name']} confirmed the booking for {r['space']} on {r['booking_date']} {r['start_time']}.")
-            msg = "Booking confirmed (KEEP)"
+            msg = "Booking confirmed (KEEP); pending reschedule requests closed"
         elif action == "CANCEL":
             conn.execute("UPDATE bookings SET status='Cancelled', updated_at=? WHERE booking_id=?",
                          (now_str(now), booking_id))
@@ -349,6 +366,20 @@ def request_reschedule(booking_id, new_date, new_start, new_end, now, db=DB_PATH
         if not r or r["status"] not in LIVE:
             conn.execute("ROLLBACK")
             return False, "Booking is not active"
+
+        # Idempotency: repeated clicks/retries for the same booking reuse the
+        # existing pending request rather than creating another approval card.
+        existing = conn.execute(
+            "SELECT request_id,new_date,new_start,new_end FROM reschedule_requests "
+            "WHERE booking_id=? AND status='Pending' ORDER BY request_id DESC LIMIT 1",
+            (booking_id,)
+        ).fetchone()
+        if existing:
+            conn.execute("COMMIT")
+            return True, (
+                f"A reschedule request is already pending (request #{existing['request_id']}). "
+                "Your original booking remains active; no duplicate was created."
+            )
 
         available = _conflict(conn, r["space"], d, s, e, exclude_id=booking_id) is None
         cur = conn.execute(
