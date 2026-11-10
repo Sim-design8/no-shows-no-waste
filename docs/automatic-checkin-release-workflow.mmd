@@ -1,0 +1,21 @@
+flowchart TD
+ A[Booking is Active] --> R[Rule-based risk review]
+ R --> S[Coordinator reviews flag and reasons]
+ S --> T[Risk score is advisory; no release action]
+
+ A --> B{T−3h check-in opens}
+ B --> C{Already KEEP or CANCEL?}
+ C -- Yes --> D[No reminder; retain resolved status]
+ C -- No --> E[App sends one automatic simulated reminder]
+ E --> F{Employee response before T−2h?}
+ F -- KEEP --> G[Confirm booking; retain space]
+ F -- CANCEL --> H[Release space immediately]
+ F -- RESCHEDULE --> I[Coordinator approval queue; original booking retained]
+ F -- No response --> J[T−2h deadline reached]
+ J --> K[Auto-release booking]
+ K --> L[Notify Coordinator and booker]
+ L --> M[Update availability for same space/date/time]
+ M --> N[Slot can be booked by another employee]
+
+ I --> O[Coordinator reviews request]
+ O --> P[Pending-at-deadline policy requires explicit decision]
