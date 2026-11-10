@@ -1,0 +1,177 @@
+"""Run: python test_booking_engine.py"""
+import os
+import tempfile
+import threading
+from datetime import datetime
+
+import pandas as pd
+
+import booking_engine as be
+
+D = "2026-11-12"
+
+
+def fresh():
+    path = os.path.join(tempfile.mkdtemp(), "t.db")
+    be.init_db(path)
+    return path
+
+
+def bk(i, space="Desk D-12", start="10:00", end="11:00", email=None):
+    return {"booking_id": i, "space": space, "booking_date": D, "start_time": start, "end_time": end,
+            "coordinator_name": "Facilities Desk", "coordinator_email": "fd@example.com",
+            "booker_name": i, "booker_email": email or f"{i}@example.com", "team": "Eng"}
+
+
+def at(h, m=0):
+    return datetime(2026, 11, 12, h, m)
+
+
+def test_overlap_and_adjacent():
+    db = fresh()
+    assert be.create_booking(bk("A"), db)[0]
+    assert not be.create_booking(bk("B"), db)[0]                                   # same slot
+    assert not be.create_booking(bk("C", start="10:30", end="11:30"), db)[0]       # overlap
+    assert not be.create_booking(bk("C", start="09:30", end="10:30"), db)[0]       # overlap before
+    assert be.create_booking(bk("D", start="11:00", end="12:00"), db)[0]           # adjacent after
+    assert be.create_booking(bk("E", start="09:00", end="10:00"), db)[0]           # adjacent before
+    assert be.create_booking(bk("F", space="Desk D-13"), db)[0]                    # other space
+
+
+def test_invalid_input():
+    db = fresh()
+    assert not be.create_booking(bk("A", start="11:00", end="10:00"), db)[0]
+    assert not be.create_booking(bk("A", start="25:00", end="26:00"), db)[0]
+    assert be.create_booking(bk("A"), db)[0]
+    assert not be.create_booking(bk("A", space="Desk D-1"), db)[0]                 # duplicate ID
+
+
+def test_concurrent_double_booking():
+    db = fresh()
+    results = []
+
+    def attempt(n):
+        results.append(be.create_booking(bk(f"T{n}"), db)[0])
+
+    threads = [threading.Thread(target=attempt, args=(n,)) for n in range(12)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert results.count(True) == 1, results
+    assert len(be.list_bookings(db, D)) == 1
+
+
+def test_csv_import_report():
+    db = fresh()
+    df = pd.DataFrame([bk("A"), bk("B"), bk("C", space="Desk D-1"),
+                       {**bk("D", space="Desk D-2"), "booker_email": ""}])
+    rep = be.import_bookings(df, db)
+    assert rep["imported"] == ["A", "C"]
+    assert {r[0] for r in rep["rejected"]} == {"B", "D"}
+    assert "Missing" in be.import_bookings(df.drop(columns=["team"]), db)["rejected"][0][1]
+
+
+def test_reminder_window_rules():
+    db = fresh()
+    be.create_booking(bk("A", start="12:00", end="13:00"), db)       # window 09:00-10:00
+    assert not be.send_reminder("A", "s", "b", at(8, 59), db)[0]     # too early
+    assert be.send_reminder("A", "s", "b", at(9, 30), db)[0]
+    assert not be.send_reminder("A", "s", "b", at(10, 0), db)[0]     # deadline reached
+
+
+def test_keep_cancel_and_auto_release():
+    db = fresh()
+    for i, sp in (("K", "Desk D-1"), ("C", "Desk D-2"), ("N", "Desk D-3"), ("U", "Desk D-4")):
+        be.create_booking(bk(i, space=sp, start="12:00", end="13:00"), db)
+        if i != "U":
+            be.send_reminder(i, "s", "b", at(9, 10), db)
+    assert be.respond("K", "KEEP", at(9, 20), db)[0]
+    assert be.respond("C", "CANCEL", at(9, 21), db)[0]
+    assert be.create_booking(bk("NEW", space="Desk D-2", start="12:00", end="13:00"), db)[0]  # slot reusable
+    assert be.process_deadlines(at(9, 59), db) == []
+    assert be.process_deadlines(at(10, 0), db) == ["N"]              # only reminded + unconfirmed
+    assert be.get_booking("K", db)["status"] == "Confirmed"
+    assert be.get_booking("U", db)["status"] == "Active"             # never warned -> never auto-released
+    assert be.create_booking(bk("N2", space="Desk D-3", start="12:00", end="13:00"), db)[0]
+    assert be.process_deadlines(at(10, 5), db) == []                 # idempotent
+
+
+def test_reschedule_available_slot_still_requires_approval():
+    db = fresh()
+    be.create_booking(bk("A"), db)
+    ok, msg = be.respond("A", "RESCHEDULE", at(9), db, (D, "14:00", "15:00"))
+    assert ok and "coordinator approval" in msg
+    # Requesting a free slot must not silently alter or confirm the original booking.
+    original = be.get_booking("A", db)
+    assert (original["booking_date"], original["start_time"], original["end_time"], original["status"]) == (D, "10:00", "11:00", "Active")
+    requests = be.pending_requests(db)
+    assert len(requests) == 1
+    assert (requests[0]["new_date"], requests[0]["new_start"], requests[0]["new_end"]) == (D, "14:00", "15:00")
+    # Only explicit coordinator approval may move the booking.
+    approved, approval_msg = be.approve_reschedule(requests[0]["request_id"], at(9, 5), db)
+    assert approved and "updated" in approval_msg
+    updated = be.get_booking("A", db)
+    assert (updated["start_time"], updated["status"]) == ("14:00", "Confirmed")
+    assert be.is_available("Desk D-12", D, "10:00", "11:00", db)
+
+
+def test_reschedule_unavailable_approval_flow():
+    db = fresh()
+    be.create_booking(bk("A"), db)
+    be.create_booking(bk("B", start="14:00", end="15:00"), db)
+    ok, msg = be.request_reschedule("A", D, "14:00", "15:00", at(9), db)
+    assert ok and "coordinator" in msg
+    assert be.get_booking("A", db)["start_time"] == "10:00"          # original protected
+    q = be.pending_requests(db)[0]
+    # someone else's booking is cancelled -> approval succeeds after re-check
+    be.respond("B", "CANCEL", at(9, 5), db)
+    ok, _ = be.approve_reschedule(q["request_id"], at(9, 10), db)
+    assert ok and be.get_booking("A", db)["start_time"] == "14:00"
+
+
+def test_approval_rechecks_availability():
+    db = fresh()
+    be.create_booking(bk("A"), db)
+    be.create_booking(bk("B", start="14:00", end="15:00"), db)
+    be.request_reschedule("A", D, "14:00", "15:00", at(9), db)
+    q = be.pending_requests(db)[0]
+    be.respond("B", "CANCEL", at(9, 1), db)
+    assert be.create_booking(bk("C", start="14:00", end="15:00"), db)[0]   # someone else grabs it meanwhile
+    ok, msg = be.approve_reschedule(q["request_id"], at(9, 10), db)
+    assert not ok and "taken" in msg
+    assert be.get_booking("A", db)["start_time"] == "10:00"                # original retained
+    assert be.get_booking("C", db)["start_time"] == "14:00"                # newer booking not overwritten
+
+
+def test_reject_keeps_original_and_applies_no_response_policy():
+    db = fresh()
+    be.create_booking(bk("A", start="12:00", end="13:00"), db)
+    be.create_booking(bk("B", start="14:00", end="15:00"), db)
+    be.request_reschedule("A", D, "14:00", "15:00", at(9, 0), db)
+    q = be.pending_requests(db)[0]
+    ok, _ = be.reject_reschedule(q["request_id"], at(9, 40), db)
+    assert ok and be.get_booking("A", db)["status"] == "Active"            # not released by the rejection itself
+    assert be.process_deadlines(at(9, 59), db) == []
+    assert be.process_deadlines(at(10, 15), db) == ["A"]                   # no reply by respond_by -> released
+    # alternatively KEEP
+    be.create_booking(bk("Z", space="Desk D-12", start="12:00", end="13:00"), db)
+    be.request_reschedule("Z", D, "14:00", "15:00", at(9, 0), db)
+    be.reject_reschedule(be.pending_requests(db)[0]["request_id"], at(9, 40), db)
+    assert be.respond("Z", "KEEP", at(9, 45), db)[0] and be.get_booking("Z", db)["status"] == "Confirmed"
+
+
+def test_alternatives():
+    db = fresh()
+    be.create_booking(bk("A", space="Desk D-12"), db)
+    be.create_booking(bk("B", space="Desk D-13"), db)
+    be.create_booking(bk("C", space="Desk D-14", start="12:00", end="13:00"), db)
+    alts = be.suggest_alternatives("Desk D-12", D, "10:00", "11:00", db)
+    assert any(a["space"] == "Desk D-14" and a["start"] == "10:00" for a in alts)
+    assert all(a["space"] != "Desk D-13" or a["start"] != "10:00" for a in alts)
+
+
+if __name__ == "__main__":
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print("PASS", t.__name__)
+    print(f"\nAll {len(tests)} tests passed")

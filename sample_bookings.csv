@@ -1,0 +1,4 @@
+booking_id,space,booking_date,start_time,end_time,coordinator_name,coordinator_email,booker_name,booker_email,team,status,past_bookings,past_no_shows,lead_days,recurring
+CSV001,Desk D-1,2026-11-12,10:00,11:00,Facilities Desk,facilities.desk@example.com,Aarav Sharma,aarav@example.com,Engineering,Active,12,5,7,0
+CSV002,Room Everest (8),2026-11-12,11:00,12:00,Facilities Desk,facilities.desk@example.com,Meera Rao,meera@example.com,Design,Active,8,1,2,1
+CSV003,Desk D-2,2026-11-12,12:00,13:00,Facilities Desk,facilities.desk@example.com,Rohan Das,rohan@example.com,Sales,Active,10,0,1,0

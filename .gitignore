@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+no_shows_bookings.db
+no_shows_bookings.db-shm
+no_shows_bookings.db-wal
+.streamlit/secrets.toml
+.env
