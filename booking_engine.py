@@ -219,6 +219,33 @@ def suggest_alternatives(space, date_s, start, end, db=DB_PATH, limit=3):
 
 
 # ----------------------------------------------------------------------------- create / import
+def _parse_bool(value):
+    """Parse CSV booleans without treating the string 'False' as true."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if text in ("", "0", "false", "no", "n", "off", "nan"):
+        return False
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    raise ValueError(f"Invalid boolean value '{value}' (use true/false or 1/0)")
+
+
+def _parse_nonnegative_int(value, field):
+    """Accept integer-like CSV values, reject malformed/negative values."""
+    if value is None or str(value).strip().lower() in ("", "nan", "none"):
+        return 0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {field} value '{value}' (use a non-negative whole number)")
+    if not number.is_integer() or number < 0:
+        raise ValueError(f"Invalid {field} value '{value}' (use a non-negative whole number)")
+    return int(number)
+
+
 def create_booking(b, db=DB_PATH):
     """b: dict with REQUIRED fields (+ OPTIONAL). Returns (ok, message)."""
     try:
@@ -228,6 +255,16 @@ def create_booking(b, db=DB_PATH):
     row = {k: b.get(k, OPTIONAL.get(k)) for k in REQUIRED + list(OPTIONAL)}
     if not row["booking_id"] or not row["space"]:
         return False, "booking_id and space are required"
+    status = str(row.get("status") or "Active").strip().title()
+    if status not in ("Active", "Confirmed"):
+        return False, f"Unsupported booking status '{status}'"
+    try:
+        row["past_bookings"] = _parse_nonnegative_int(row["past_bookings"], "past_bookings")
+        row["past_no_shows"] = _parse_nonnegative_int(row["past_no_shows"], "past_no_shows")
+        row["lead_days"] = _parse_nonnegative_int(row["lead_days"], "lead_days")
+        row["recurring"] = _parse_bool(row["recurring"])
+    except ValueError as ex:
+        return False, str(ex)
     conn = connect(db)
     try:
         conn.execute("BEGIN IMMEDIATE")           # take the write lock BEFORE checking
@@ -240,9 +277,9 @@ def create_booking(b, db=DB_PATH):
                 "coordinator_email,booker_name,booker_email,team,status,past_bookings,past_no_shows,lead_days,"
                 "recurring,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (row["booking_id"], row["space"], d, s, e, row["coordinator_name"], row["coordinator_email"],
-                 row["booker_name"], row["booker_email"], row["team"], "Active",
-                 int(row["past_bookings"] or 0), int(row["past_no_shows"] or 0),
-                 int(row["lead_days"] or 0), int(bool(row["recurring"])), now_str(datetime.now())))
+                 row["booker_name"], row["booker_email"], row["team"], status,
+                 row["past_bookings"], row["past_no_shows"],
+                 row["lead_days"], int(row["recurring"]), now_str(datetime.now())))
         except sqlite3.IntegrityError:
             conn.execute("ROLLBACK")
             return False, f"Booking ID {row['booking_id']} already exists"
@@ -267,19 +304,25 @@ def import_bookings(df, db=DB_PATH):
     imported, rejected = [], []
     for rec in df.to_dict("records"):
         bid = str(rec.get("booking_id", "")).strip()
-        status = str(rec.get("status", "Active") or "Active").strip().title()
-        if status not in ("Active", "Confirmed"):
-            rejected.append((bid, f"status '{status}' is not importable"))
-            continue
-        if any(str(rec.get(c, "")).strip() in ("", "nan") for c in REQUIRED):
-            rejected.append((bid, "missing required value"))
-            continue
-        for k, v in OPTIONAL.items():
-            if rec.get(k) in (None, "") or str(rec.get(k)) == "nan":
-                rec[k] = v
-        rec["booking_id"] = bid
-        ok, msg = create_booking(rec, db)
-        (imported if ok else rejected).append(bid if ok else (bid, msg))
+        try:
+            raw_status = rec.get("status", "Active")
+            status = "Active" if raw_status is None or str(raw_status).strip().lower() in ("", "nan", "none") else str(raw_status).strip().title()
+            if status not in ("Active", "Confirmed"):
+                raise ValueError(f"status '{status}' is not importable")
+            if any(str(rec.get(c, "")).strip().lower() in ("", "nan", "none") for c in REQUIRED):
+                raise ValueError("missing required value")
+            rec["booking_id"] = bid
+            rec["status"] = status
+            for field in ("past_bookings", "past_no_shows", "lead_days"):
+                rec[field] = _parse_nonnegative_int(rec.get(field, OPTIONAL[field]), field)
+            rec["recurring"] = _parse_bool(rec.get("recurring", OPTIONAL["recurring"]))
+            ok, msg = create_booking(rec, db)
+            if ok:
+                imported.append(bid)
+            else:
+                rejected.append((bid, msg))
+        except (TypeError, ValueError) as ex:
+            rejected.append((bid, str(ex)))
     return {"imported": imported, "rejected": rejected}
 
 
@@ -290,25 +333,36 @@ def checkin_window(b):
 
 
 def send_reminder(booking_id, subject, body, now, db=DB_PATH):
-    """Coordinator sends a (simulated) reminder. Only allowed while the check-in window is open."""
-    b = get_booking(booking_id, db)
-    if not b or b["status"] != "Active":
-        return False, "Only active, unconfirmed bookings can be sent a reminder"
-    opens, deadline = checkin_window(b)
-    if now < opens:
-        return False, f"Check-in window opens at {opens.strftime('%H:%M')}"
-    if now >= deadline:
-        return False, f"Check-in deadline ({deadline.strftime('%H:%M')}) has passed"
+    """Atomically send one simulated reminder only for an eligible Active booking."""
     conn = connect(db)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM bookings WHERE booking_id=?", (booking_id,)).fetchone()
+        if not row or row["status"] != "Active":
+            conn.execute("ROLLBACK")
+            return False, "Only active, unconfirmed bookings can be sent a reminder"
+        b = dict(row)
+        if b["reminder_sent_at"]:
+            conn.execute("ROLLBACK")
+            return False, "A reminder has already been sent for this booking"
+        opens, deadline = checkin_window(b)
+        if now < opens:
+            conn.execute("ROLLBACK")
+            return False, f"Check-in window opens at {opens.strftime('%H:%M')}"
+        if now >= deadline:
+            conn.execute("ROLLBACK")
+            return False, f"Check-in deadline ({deadline.strftime('%H:%M')}) has passed"
         conn.execute("UPDATE bookings SET reminder_sent_at=?, respond_by=?, updated_at=? WHERE booking_id=?",
                      (now_str(now), now_str(deadline), now_str(now), booking_id))
         _notify(conn, now, booking_id, "reminder", b["booker_email"], subject, body)
         conn.execute("COMMIT")
+        return True, f"Reminder sent to {b['booker_email']}. Respond by {deadline.strftime('%H:%M')}."
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
-    return True, f"Reminder sent to {b['booker_email']}. Respond by {deadline.strftime('%H:%M')}."
 
 
 def respond(booking_id, action, now, db=DB_PATH, new_slot=None):
@@ -460,13 +514,17 @@ def reject_reschedule(request_id, now, db=DB_PATH):
             return False, "Request not found or already handled"
         r = conn.execute("SELECT * FROM bookings WHERE booking_id=?", (q["booking_id"],)).fetchone()
         conn.execute("UPDATE reschedule_requests SET status='Rejected' WHERE request_id=?", (request_id,))
-        if r and r["status"] in LIVE:
+        if r and r["status"] == "Active":
             _, deadline = checkin_window(dict(r))
             respond_by = max(deadline, now + timedelta(minutes=REJECT_GRACE_MIN))
-            conn.execute("UPDATE bookings SET status='Active', reminder_sent_at=?, respond_by=?, updated_at=? "
-                         "WHERE booking_id=?", (now_str(now), now_str(respond_by), now_str(now), r["booking_id"]))
+            conn.execute("UPDATE bookings SET reminder_sent_at=COALESCE(reminder_sent_at, ?), respond_by=?, updated_at=? "
+                         "WHERE booking_id=? AND status='Active'",
+                         (now_str(now), now_str(respond_by), now_str(now), r["booking_id"]))
             _notify(conn, now, r["booking_id"], "reschedule_rejected", r["booker_email"], "Reschedule not possible",
                     f"Your reschedule was rejected. Your original booking is still active. Please reply KEEP or CANCEL by {respond_by.strftime('%H:%M')}.")
+        elif r and r["status"] == "Confirmed":
+            _notify(conn, now, r["booking_id"], "reschedule_rejected", r["booker_email"], "Reschedule not possible",
+                    "Your reschedule was rejected. Your original booking remains confirmed; no further action is needed.")
         conn.execute("COMMIT")
         return True, "Rejected. Original booking retained; booker asked to KEEP or CANCEL"
     finally:
