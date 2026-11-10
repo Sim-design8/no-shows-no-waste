@@ -7,8 +7,9 @@ Rules implemented (see PRD):
 - The availability check and the save happen in ONE transaction (BEGIN IMMEDIATE), so two simultaneous
   requests cannot both take the same slot.
 - Check-in window: opens 3 h before start, closes (deadline) 2 h before start.
-- KEEP confirms; CANCEL releases immediately; RESCHEDULE auto-updates if the new slot is free, otherwise
-  goes to the coordinator, who approves (availability is re-checked) or rejects (original booking stays).
+- KEEP confirms; CANCEL releases immediately; RESCHEDULE always creates a coordinator approval request.
+  The original booking remains active until approval; availability is re-checked inside the approval transaction.
+  Repeated submissions reuse the existing pending request; only one pending request per booking is allowed.
 - A booking that was sent a reminder and is still unconfirmed at its response deadline is auto-released.
 
 Limit: SQLite transactions protect one database file. A multi-server production system would use
