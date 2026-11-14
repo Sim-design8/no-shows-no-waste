@@ -298,11 +298,33 @@ else:
             with st.container(border=True):
                 st.markdown(f"**{q['booker_name']}** ({q['booker_email']}) · {q['space']}")
                 st.write(f"Original: {q['cur_date']} {q['cur_start']}–{q['cur_end']}  →  Requested: {q['new_date']} {q['new_start']}–{q['new_end']}")
-                a,b=st.columns(2)
-                if a.button("Approve after availability re-check",key=f"approve_{q['request_id']}",use_container_width=True):
-                    ok,msg=be.approve_reschedule(q['request_id'],now,DB); st.session_state.notice=msg; st.rerun()
-                if b.button("Reject request",key=f"reject_{q['request_id']}",use_container_width=True):
-                    ok,msg=be.reject_reschedule(q['request_id'],now,DB); st.session_state.notice=msg; st.rerun()
+                check_key=f"reschedule_availability_{q['request_id']}"
+                if check_key in st.session_state:
+                    if st.session_state[check_key]:
+                        st.success("Requested slot is currently available. Approval will check again before changing the booking.")
+                    else:
+                        st.error("Requested slot is not available. Do not approve; ask the employee to choose another time.")
+                check_col,approve_col,reject_col=st.columns(3)
+                if check_col.button("Check availability",key=f"check_{q['request_id']}",use_container_width=True):
+                    try:
+                        st.session_state[check_key]=be.is_available(
+                            q["space"],q["new_date"],q["new_start"],q["new_end"],DB,
+                            exclude_id=q["booking_id"]
+                        )
+                    except ValueError as ex:
+                        st.session_state[check_key]=False
+                        st.session_state.notice=f"Could not check requested slot: {ex}"
+                    st.rerun()
+                if approve_col.button("Approve request",key=f"approve_{q['request_id']}",use_container_width=True):
+                    ok,msg=be.approve_reschedule(q['request_id'],now,DB)
+                    st.session_state.notice=msg
+                    st.session_state.pop(check_key,None)
+                    st.rerun()
+                if reject_col.button("Reject request",key=f"reject_{q['request_id']}",use_container_width=True):
+                    ok,msg=be.reject_reschedule(q['request_id'],now,DB)
+                    st.session_state.notice=msg
+                    st.session_state.pop(check_key,None)
+                    st.rerun()
     with tab4:
         notifications=be.notifications(DB)
         st.caption("All messages are simulated. No email is actually sent.")
