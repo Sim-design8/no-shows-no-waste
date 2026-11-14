@@ -192,11 +192,15 @@ if view.startswith("Booker"):
                         "Your original booking remains active."
                     )
                 if b['status'] in be.LIVE:
-                    if b['reminder_sent_at']:
+                    if b['status'] == "Active" and b['reminder_sent_at']:
                         st.warning(f"Reminder received · Please respond by {b['respond_by'][-5:] if b['respond_by'] else 'the deadline'}")
-                    a,bcol,cc=st.columns(3)
-                    if a.button("✓ KEEP",key=f"keep_{b['booking_id']}",use_container_width=True):
-                        ok,msg=be.respond(b['booking_id'],"KEEP",now,DB); st.session_state.notice=msg; st.rerun()
+                    if b['status'] == "Active":
+                        keep_col,bcol,cc=st.columns(3)
+                        if keep_col.button("✓ KEEP",key=f"keep_{b['booking_id']}",use_container_width=True):
+                            ok,msg=be.respond(b['booking_id'],"KEEP",now,DB); st.session_state.notice=msg; st.rerun()
+                    else:
+                        st.success("Booking confirmed. You can still cancel or request a reschedule.")
+                        bcol,cc=st.columns(2)
                     if bcol.button("↗ RESCHEDULE",key=f"res_{b['booking_id']}",use_container_width=True,
                                    disabled=pending_request is not None):
                         st.session_state[f"show_res_{b['booking_id']}"]=not st.session_state.get(f"show_res_{b['booking_id']}",False)
