@@ -66,6 +66,29 @@ def make_demo_df(day: date, seed: int = 15):
 def seed_demo(day):
     be.reset_db(DB); return be.import_bookings(make_demo_df(day),DB)
 
+def create_no_response_test_booking(day, now):
+    """Create a clearly labelled, high-risk synthetic booking for the T-2 demo."""
+    start_dt = now + timedelta(hours=3)
+    if start_dt.date() != day or start_dt.hour >= 20:
+        return False, "Set the Demo clock between 08:00 and 17:00 to create a same-day test booking."
+    start = start_dt.strftime("%H:%M")
+    end = (start_dt + timedelta(hours=1)).strftime("%H:%M")
+    booking_id = f"TEST{day:%Y%m%d}{random.randint(1000,9999)}"
+    booking = {
+        "booking_id": booking_id, "space": "TEST Desk - No response",
+        "booking_date": day.isoformat(), "start_time": start, "end_time": end,
+        "coordinator_name": HOST_NAME, "coordinator_email": HOST_EMAIL,
+        "booker_name": "No-response Test Employee",
+        "booker_email": "no-response-test@example.com", "team": "Demo",
+        "status": "Active", "past_bookings": 10, "past_no_shows": 5,
+        "lead_days": 10, "recurring": 1
+    }
+    ok, msg = be.create_booking(booking, DB)
+    if ok:
+        deadline = start_dt - timedelta(hours=2)
+        return True, f"Test booking {booking_id} created for {start}–{end}. Risk should be High. Send its reminder now; deadline is {deadline:%H:%M}."
+    return False, f"Could not create test booking: {msg}"
+
 # ---------- risk + reminder ----------
 def risk(b, now):
     score=0; why=[]
@@ -125,6 +148,12 @@ with st.sidebar:
         st.download_button("Download CSV template",make_demo_df(demo_day).head(3).to_csv(index=False),"bookings_template.csv","text/csv",use_container_width=True)
         if st.button("Reset demo data",use_container_width=True):
             report=seed_demo(demo_day); st.session_state.notice=f"Loaded {len(report['imported'])} synthetic bookings."; st.rerun()
+        st.caption("Need a predictable test? This adds one clearly labelled synthetic booking with High risk.")
+        if st.button("Create test no-response booking",use_container_width=True):
+            ok,msg=create_no_response_test_booking(demo_day,now)
+            if ok: st.session_state.notice=msg
+            else: st.session_state.notice=msg
+            st.rerun()
     else:
         api_key=""; model=DEFAULT_MODEL
     st.divider()
